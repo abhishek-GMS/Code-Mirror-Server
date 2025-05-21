@@ -35,7 +35,7 @@ app.use(express.json());
 
 const io = new Server(server, {
   cors: {
-    origin: "https://fast-job-ai-code-editor.netlify.app/",
+    origin: "*",    // allow all origins
     methods: ["GET", "POST"],
   },
 });
