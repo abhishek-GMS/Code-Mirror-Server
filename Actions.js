@@ -1,4 +1,4 @@
-// === Actions.js ===
+// === Actions.js ====
 const ACTIONS = {
   HOST_JOIN:      "host-join",      // host creates/enters the room
   REQUEST_JOIN:   "request-join",   // participant asks to join
