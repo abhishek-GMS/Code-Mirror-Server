@@ -2,115 +2,92 @@ const express = require("express");
 const app = express();
 const http = require("http");
 const { Server } = require("socket.io");
-const ACTIONS = require("./Actions");
 const cors = require("cors");
-const axios = require("axios");
-const server = http.createServer(app);
-require("dotenv").config();
+const ACTIONS = require("./Actions");
 
-const languageConfig = {
-  python3: { versionIndex: "3" },
-  java: { versionIndex: "3" },
-  cpp: { versionIndex: "4" },
-  nodejs: { versionIndex: "3" },
-  c: { versionIndex: "4" },
-  ruby: { versionIndex: "3" },
-  go: { versionIndex: "3" },
-  scala: { versionIndex: "3" },
-  bash: { versionIndex: "3" },
-  sql: { versionIndex: "3" },
-  pascal: { versionIndex: "2" },
-  csharp: { versionIndex: "3" },
-  php: { versionIndex: "3" },
-  swift: { versionIndex: "3" },
-  rust: { versionIndex: "3" },
-  r: { versionIndex: "3" },
-};
-
-// Enable CORS
 app.use(cors());
-
-// Parse JSON bodies
 app.use(express.json());
 
-const io = new Server(server, {
-  cors: {
-    origin: "*",    // allow all origins
-    methods: ["GET", "POST"],
-  },
-});
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*", methods: ["GET","POST"] } });
 
+// track username by socket
 const userSocketMap = {};
-const getAllConnectedClients = (roomId) => {
-  return Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
-    (socketId) => {
-      return {
-        socketId,
-        username: userSocketMap[socketId],
-      };
-    }
-  );
-};
+// track which socket is host for each room
+const roomHosts = {};
 
-io.on("connection", (socket) => {
-  // console.log('Socket connected', socket.id);
-  socket.on(ACTIONS.JOIN, ({ roomId, username }) => {
+const getAllConnectedClients = roomId =>
+  Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(socketId => ({
+    socketId,
+    username: userSocketMap[socketId]
+  }));
+
+io.on("connection", socket => {
+  // 1) Host enters
+  socket.on(ACTIONS.HOST_JOIN, ({ roomId, username }) => {
     userSocketMap[socket.id] = username;
+    roomHosts[roomId] = socket.id;
     socket.join(roomId);
-    const clients = getAllConnectedClients(roomId);
-    // notify that new user join
-    clients.forEach(({ socketId }) => {
-      io.to(socketId).emit(ACTIONS.JOINED, {
-        clients,
-        username,
-        socketId: socket.id,
-      });
-    });
+    console.log(`Host ${username} (${socket.id}) created room ${roomId}`);
   });
 
-  // sync the code
+  // 2) Participant requests to join
+  socket.on(ACTIONS.REQUEST_JOIN, ({ roomId, username }) => {
+    userSocketMap[socket.id] = username;
+    const hostId = roomHosts[roomId];
+    if (hostId) {
+      console.log(`Participant ${username} requests to join ${roomId}`);
+      io.to(hostId).emit(ACTIONS.JOIN_REQUEST, { socketId: socket.id, username });
+    } else {
+      // no host => auto reject
+      socket.emit(ACTIONS.JOIN_REJECTED);
+    }
+  });
+
+  // 3) Host approves
+  socket.on(ACTIONS.APPROVE_JOIN, ({ roomId, socketId }) => {
+    const client = io.sockets.sockets.get(socketId);
+    if (client) {
+      client.join(roomId);
+      console.log(`Host approved ${userSocketMap[socketId]} (${socketId})`);
+      // notify that client was approved
+      io.to(socketId).emit(ACTIONS.JOIN_APPROVED);
+
+      // broadcast new member list
+      const clients = getAllConnectedClients(roomId);
+      clients.forEach(({ socketId }) => {
+        io.to(socketId).emit(ACTIONS.JOINED, { clients, username: userSocketMap[socket.id], socketId });
+      });
+    }
+  });
+
+  // 4) Host rejects
+  socket.on(ACTIONS.REJECT_JOIN, ({ socketId }) => {
+    console.log(`Host rejected request for ${socketId}`);
+    io.to(socketId).emit(ACTIONS.JOIN_REJECTED);
+  });
+
+  // 5) Code sync events
   socket.on(ACTIONS.CODE_CHANGE, ({ roomId, code }) => {
     socket.in(roomId).emit(ACTIONS.CODE_CHANGE, { code });
   });
-  // when new user join the room all the code which are there are also shows on that persons editor
   socket.on(ACTIONS.SYNC_CODE, ({ socketId, code }) => {
     io.to(socketId).emit(ACTIONS.CODE_CHANGE, { code });
   });
 
-  // leave room
+  // 6) Handle disconnect
   socket.on("disconnecting", () => {
     const rooms = [...socket.rooms];
-    // leave all the room
-    rooms.forEach((roomId) => {
+    rooms.forEach(roomId => {
       socket.in(roomId).emit(ACTIONS.DISCONNECTED, {
         socketId: socket.id,
-        username: userSocketMap[socket.id],
+        username: userSocketMap[socket.id]
       });
     });
-
     delete userSocketMap[socket.id];
     socket.leave();
   });
 });
 
-app.post("/compile", async (req, res) => {
-  const { code, language } = req.body;
-
-  try {
-    const response = await axios.post("https://api.jdoodle.com/v1/execute", {
-      script: code,
-      language: language,
-      versionIndex: languageConfig[language].versionIndex,
-      clientId: process.env.jDoodle_clientId,
-      clientSecret: process.env.kDoodle_clientSecret,
-    });
-
-    res.json(response.data);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to compile code" });
-  }
-});
-
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Server is runnint on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
